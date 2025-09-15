@@ -39,7 +39,15 @@ fi
 
 WORKTREE_DIR="${REPO_ROOT}/.deploy-worktree"
 
-# Clean previous worktree dir if exists
+# Prune stale worktrees (avoids "already checked out" on reruns)
+git worktree prune -v || true
+
+# If a worktree is registered at the same path, remove it first
+if git worktree list --porcelain | grep -q "^worktree ${WORKTREE_DIR}$"; then
+  git worktree remove --force "${WORKTREE_DIR}" || true
+fi
+
+# Clean previous worktree dir if exists on disk
 if [[ -d "${WORKTREE_DIR}" ]]; then
   rm -rf "${WORKTREE_DIR}"
 fi
