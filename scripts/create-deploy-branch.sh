@@ -93,7 +93,17 @@ popd >/dev/null
 
 echo "Fazendo push automático para ${REMOTE_NAME} ${BRANCH_NAME}..."
 pushd "${WORKTREE_DIR}" >/dev/null
-git push -u "${REMOTE_NAME}" "${BRANCH_NAME}"
+# Fetch remote state to make push decisions
+git fetch "${REMOTE_NAME}" "${BRANCH_NAME}" || true
+
+# Use a safe force push by default (deploy branch is build-only)
+# Set DEPLOY_FORCE_PUSH=false to disable force-with-lease
+DEPLOY_FORCE_PUSH="${DEPLOY_FORCE_PUSH:-true}"
+if [[ "${DEPLOY_FORCE_PUSH}" == "true" ]]; then
+  git push --force-with-lease -u "${REMOTE_NAME}" "${BRANCH_NAME}"
+else
+  git push -u "${REMOTE_NAME}" "${BRANCH_NAME}"
+fi
 popd >/dev/null
 
 echo "Branch '${BRANCH_NAME}' atualizado e enviado para ${REMOTE_NAME}."
