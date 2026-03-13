@@ -1,4 +1,4 @@
-import { proto, WASocket } from "@whiskeysockets/baileys";
+import type { proto, WASocket } from "@whiskeysockets/baileys";
 // import cacheLayer from "../libs/cache";
 import { getIO } from "../libs/socket";
 import Message from "../models/Message";
@@ -23,13 +23,13 @@ const SetTicketMessagesAsRead = async (ticket: Ticket): Promise<void> => {
     });
 
     if (getJsonMessage.length > 0) {
-      const lastMessages: proto.IWebMessageInfo = JSON.parse(
+      const lastMessage: proto.IWebMessageInfo & { key: proto.IMessageKey } = JSON.parse(
         JSON.stringify(getJsonMessage[0].dataJson)
       );
 
-      if (lastMessages.key && lastMessages.key.fromMe === false) {
+      if (lastMessage.key && lastMessage.key.fromMe === false) {
         await (wbot as WASocket).chatModify(
-          { markRead: true, lastMessages: [lastMessages] },
+          { markRead: true, lastMessages: [lastMessage as any] },
           `${ticket.contact.number}@${
             ticket.isGroup ? "g.us" : "s.whatsapp.net"
           }`

@@ -1,4 +1,4 @@
-import { proto, WASocket } from "@whiskeysockets/baileys";
+import type { proto, WASocket, WAMessage } from "@whiskeysockets/baileys";
 import Contact from "../../models/Contact";
 import Setting from "../../models/Setting";
 import Ticket from "../../models/Ticket";
@@ -11,7 +11,7 @@ import axios from 'axios';
 import UpdateTicketService from "../TicketServices/UpdateTicketService";
 import fs from 'fs';
 
-export const provider = async (ticket: Ticket, msg: proto.IWebMessageInfo, companyId: number, contact: Contact, wbot: WASocket) => {
+export const provider = async (ticket: Ticket, msg: WAMessage, companyId: number, contact: Contact, wbot: WASocket) => {
   const filaescolhida = ticket.queue?.name
   if (filaescolhida === "2ª Via de Boleto" || filaescolhida === "2 Via de Boleto") {
     let cpfcnpj

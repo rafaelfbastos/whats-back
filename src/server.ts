@@ -26,21 +26,27 @@ const server = app.listen(process.env.PORT, async () => {
   }
 });
 
+const logRejection = (label: string, reason: any, promise?: any) => {
+  logger.error(
+    {
+      name: reason?.name,
+      message: reason?.message,
+      stack: reason?.stack,
+      promise
+    },
+    `${new Date().toUTCString()} ${label}`
+  );
+};
+
 process.on("uncaughtException", err => {
-  console.error(`${new Date().toUTCString()} uncaughtException:`, err.message);
-  console.error(err.stack);
-  process.exit(1);
+  logRejection("uncaughtException", err);
+  // Remove process.exit(1); to avoid abrupt shutdowns
 });
 
 process.on("unhandledRejection", (reason, p) => {
-  console.error(
-    `${new Date().toUTCString()} unhandledRejection:`,
-    reason,
-    p
-  );
-  process.exit(1);
+  logRejection("unhandledRejection", reason, p);
+  // Remove process.exit(1); to avoid abrupt shutdowns
 });
-
 
 cron.schedule("* * * * *", async () => {
   try {

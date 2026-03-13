@@ -118,7 +118,6 @@ class Whatsapp extends Model<Whatsapp> {
   @Column
   timeToTransfer: number;  
 
-
   @ForeignKey(() => Prompt)
   @Column
   promptId: number;

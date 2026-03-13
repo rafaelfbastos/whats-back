@@ -1,11 +1,18 @@
 import axios from "axios";
+import { promises as fs } from "fs";
+import os from "os";
+import path from "path";
+import { randomUUID } from "crypto";
+import puppeteer from "puppeteer";
 import Ticket from "../../models/Ticket";
 import QueueIntegrations from "../../models/QueueIntegrations";
-import { WASocket, delay, proto } from "@whiskeysockets/baileys";
+import type { WASocket, proto, WAMessage } from "@whiskeysockets/baileys";
+import { loadBaileys } from "../../libs/baileys";
 import { getBodyMessage } from "../WbotServices/wbotMessageListener";
 import { logger } from "../../utils/logger";
 import { isNil } from "lodash";
 import UpdateTicketService from "../TicketServices/UpdateTicketService";
+import getNumberFromJid from "../../utils/getNumberFromJid";
 
 
 type Session = WASocket & {
@@ -13,23 +20,231 @@ type Session = WASocket & {
 };
 
 interface Request {
-    wbot: Session;
-    msg: proto.IWebMessageInfo;
-    ticket: Ticket;
-    typebot: QueueIntegrations;
+  wbot: Session;
+  msg: WAMessage;
+  ticket: Ticket;
+  typebot: QueueIntegrations;
 }
 
+interface FileTriggerPayload {
+  url: string;
+  convert?: boolean;
+  caption?: string;
+  fileName?: string;
+}
+
+interface ContactTriggerPayload {
+  phone: string;
+  displayName?: string;
+  fullName?: string;
+  formattedPhone?: string;
+  organization?: string;
+  email?: string;
+}
+
+const typebotTempDir = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "..",
+  "tmp",
+  "typebot"
+);
+
+const ensureTempDir = async (): Promise<string> => {
+  await fs.mkdir(typebotTempDir, { recursive: true });
+  return typebotTempDir;
+};
+
+const sanitizeFileName = (name: string): string => {
+  if (!name) return "";
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+};
+
+const getFileNameFromUrl = (fileUrl: string): string => {
+  try {
+    const parsedUrl = new URL(fileUrl);
+    const baseName = path.basename(parsedUrl.pathname);
+    return baseName || "";
+  } catch {
+    return "";
+  }
+};
+
+const downloadFileToTemp = async (
+  fileUrl: string,
+  desiredName?: string
+): Promise<{ filePath: string; fileName: string; mimeType: string }> => {
+  const baseTmpDir = await ensureTempDir();
+  const response = await axios.get<ArrayBuffer>(fileUrl, {
+    responseType: "arraybuffer"
+  });
+
+  const safeName =
+    sanitizeFileName(desiredName || getFileNameFromUrl(fileUrl)) ||
+    `arquivo-${Date.now()}`;
+
+  const filePath = path.join(baseTmpDir, `${randomUUID()}-${safeName}`);
+  await fs.writeFile(filePath, Buffer.from(response.data));
+
+  return {
+    filePath,
+    fileName: safeName,
+    mimeType: response.headers["content-type"] || "application/octet-stream"
+  };
+};
+
+const convertUrlToPdf = async (
+  pageUrl: string,
+  desiredName?: string
+): Promise<{ filePath: string; fileName: string; mimeType: string }> => {
+  const baseTmpDir = await ensureTempDir();
+  const browser = await puppeteer.launch({
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    ignoreHTTPSErrors: true,
+    headless: true
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.goto(pageUrl, {
+      waitUntil: "networkidle2",
+      timeout: 90000
+    });
+
+    const baseName =
+      sanitizeFileName(desiredName?.replace(/\.pdf$/i, "") || getFileNameFromUrl(pageUrl) || "documento") +
+      ".pdf";
+    const filePath = path.join(baseTmpDir, `${randomUUID()}-${baseName}`);
+
+    await page.pdf({
+      path: filePath,
+      format: "A4",
+      printBackground: true
+    });
+
+    return {
+      filePath,
+      fileName: baseName,
+      mimeType: "application/pdf"
+    };
+  } finally {
+    await browser.close();
+  }
+};
+
+const cleanupTempFile = async (filePath?: string) => {
+  if (!filePath) return;
+  try {
+    await fs.unlink(filePath);
+  } catch (err) {
+    logger.warn({ filePath, err }, "typebot-file-cleanup-error");
+  }
+};
+
+const sanitizeDigits = (value: string): string => {
+  return value.replace(/\D/g, "");
+};
+
+const buildContactVcard = (payload: ContactTriggerPayload): { vcard: string; displayName: string } => {
+  const phoneDigits = sanitizeDigits(payload.phone || "");
+
+  if (!phoneDigits) {
+    throw new Error("A phone number is required to send a contact");
+  }
+
+  const displayName = payload.fullName || payload.displayName || phoneDigits;
+  const formattedPhone = payload.formattedPhone || payload.phone || phoneDigits;
+
+  const lines = [
+    "BEGIN:VCARD",
+    "VERSION:3.0",
+    `FN:${displayName}`
+  ];
+
+  if (payload.organization) {
+    lines.push(`ORG:${payload.organization};`);
+  }
+
+  if (payload.email) {
+    lines.push(`EMAIL;type=INTERNET:${payload.email}`);
+  }
+
+  lines.push(`TEL;type=CELL;type=VOICE;waid=${phoneDigits}:${formattedPhone}`);
+  lines.push("END:VCARD");
+
+  return {
+    vcard: lines.join("\n"),
+    displayName
+  };
+};
+
+const handleContactTrigger = async ({
+  payload,
+  wbot,
+  remoteJid
+}: {
+  payload: ContactTriggerPayload;
+  wbot: Session;
+  remoteJid: string;
+}): Promise<void> => {
+  const { vcard, displayName } = buildContactVcard(payload);
+
+  await wbot.sendMessage(remoteJid, {
+    contacts: {
+      displayName,
+      contacts: [{ vcard }]
+    }
+  });
+};
+
+const handleFileTrigger = async ({
+  payload,
+  wbot,
+  remoteJid
+}: {
+  payload: FileTriggerPayload;
+  wbot: Session;
+  remoteJid: string;
+}): Promise<void> => {
+  const { url, convert = false, caption, fileName } = payload;
+
+  if (!url) {
+    throw new Error("URL is required to send a file.");
+  }
+
+  let fileInfo:
+    | { filePath: string; fileName: string; mimeType: string }
+    | undefined;
+
+  try {
+    fileInfo = convert
+      ? await convertUrlToPdf(url, fileName)
+      : await downloadFileToTemp(url, fileName);
+
+    await wbot.sendMessage(remoteJid, {
+      document: { url: fileInfo.filePath },
+      mimetype: fileInfo.mimeType,
+      fileName: fileInfo.fileName,
+      caption
+    });
+  } finally {
+    await cleanupTempFile(fileInfo?.filePath);
+  }
+};
 
 const typebotListener = async ({
-    wbot,
-    msg,
-    ticket,
-    typebot
+  wbot,
+  msg,
+  ticket,
+  typebot
 }: Request): Promise<void> => {
+  const { delay } = await loadBaileys();
 
     if (msg.key.remoteJid === 'status@broadcast') return;
 
-    const { urlN8N: url,
+    const {
+        urlN8N: url,
         typebotExpires,
         typebotKeywordFinish,
         typebotKeywordRestart,
@@ -39,9 +254,19 @@ const typebotListener = async ({
         typebotRestartMessage
     } = typebot;
 
-    const number = msg.key.remoteJid.replace(/\D/g, '');
+    const number = getNumberFromJid(msg.key.remoteJid);
 
-    let body = getBodyMessage(msg);
+    const normalizedKeywordFinish = typeof typebotKeywordFinish === "string" ? typebotKeywordFinish : "";
+    const closedWords = normalizedKeywordFinish
+        .split(' ')
+        .map(word => word.trim())
+        .filter(word => word.length > 0);
+
+    const keywordRestart = typebotKeywordRestart || "";
+    const restartMessage = typebotRestartMessage || typebotUnknownMessage || "";
+    const unknownMessage = typebotUnknownMessage || "Desculpe, não entendi.";
+
+    let body = getBodyMessage(msg) || "";
 
     async function createSession(msg, typebot, number) {
         try {
@@ -59,7 +284,7 @@ const typebotListener = async ({
             });
 
             const config = {
-                method: 'post' as const,
+                method: 'post',
                 maxBodyLength: Infinity,
                 url: `${url}/api/v1/typebots/${typebotSlug}/startChat`,
                 headers: {
@@ -117,7 +342,7 @@ const typebotListener = async ({
         //let body = getConversationMessage(msg);
 
 
-        if (body !== typebotKeywordFinish && body !== typebotKeywordRestart) {
+        if (!closedWords.includes(body) && body !== keywordRestart) {
             let requestContinue
             let messages
             let input
@@ -127,7 +352,7 @@ const typebotListener = async ({
                 });
 
                 let config = {
-                    method: 'post' as const,
+                    method: 'post',
                     maxBodyLength: Infinity,
                     url: `${url}/api/v1/sessions/${sessionId}/continueChat`,
                     headers: {
@@ -145,7 +370,7 @@ const typebotListener = async ({
             }
 
             if (messages?.length === 0) {
-                await wbot.sendMessage(`${number}@c.us`, { text: typebotUnknownMessage });
+                await wbot.sendMessage(`${number}@c.us`, { text: unknownMessage });
             } else {
                 for (const message of messages) {
                     if (message.type === 'text') {
@@ -232,7 +457,7 @@ const typebotListener = async ({
                         formattedText = formattedText.replace('**', '').replace(/\n$/, '');
 
                         if (formattedText === "Invalid message. Please, try again.") {
-                            formattedText = typebotUnknownMessage;
+                            formattedText = unknownMessage;
                         }
 
                         if (formattedText.startsWith("#")) {
@@ -264,6 +489,62 @@ const typebotListener = async ({
                                     return;
                                 }
 
+                                if (
+                                    (jsonGatilho.action === "sendFile" || jsonGatilho.type === "sendFile") &&
+                                    jsonGatilho.url
+                                ) {
+                                    try {
+                                        await handleFileTrigger({
+                                            payload: {
+                                                url: jsonGatilho.url,
+                                                convert: Boolean(jsonGatilho.convert),
+                                                caption: jsonGatilho.caption,
+                                                fileName: jsonGatilho.fileName
+                                            },
+                                            wbot,
+                                            remoteJid: msg.key.remoteJid
+                                        });
+                                    } catch (error) {
+                                        logger.warn(
+                                            {
+                                                payload: jsonGatilho,
+                                                error
+                                            },
+                                            "typebot-send-file-trigger-error"
+                                        );
+                                    }
+                                    continue;
+                                }
+
+                                if (
+                                    (jsonGatilho.action === "sendContact" || jsonGatilho.type === "sendContact") &&
+                                    jsonGatilho.phone
+                                ) {
+                                    try {
+                                        await handleContactTrigger({
+                                            payload: {
+                                                phone: jsonGatilho.phone,
+                                                displayName: jsonGatilho.displayName,
+                                                fullName: jsonGatilho.fullName,
+                                                formattedPhone: jsonGatilho.formattedPhone,
+                                                organization: jsonGatilho.organization,
+                                                email: jsonGatilho.email
+                                            },
+                                            wbot,
+                                            remoteJid: msg.key.remoteJid
+                                        });
+                                    } catch (error) {
+                                        logger.warn(
+                                            {
+                                                payload: jsonGatilho,
+                                                error
+                                            },
+                                            "typebot-send-contact-trigger-error"
+                                        );
+                                    }
+                                    continue;
+                                }
+
                                 if (!isNil(jsonGatilho.queueId) && jsonGatilho.queueId > 0 && !isNil(jsonGatilho.userId) && jsonGatilho.userId > 0) {
                                     await UpdateTicketService({
                                         ticketData: {
@@ -280,7 +561,11 @@ const typebotListener = async ({
                                     return;
                                 }
                             } catch (err) {
-                                throw err
+                                logger.warn("Invalid typebot trigger payload", {
+                                    gatilho,
+                                    ticketId: ticket.id,
+                                    error: err
+                                });
                             }
                         }
 
@@ -376,7 +661,7 @@ const typebotListener = async ({
                 }
             }
         }
-        if (body === typebotKeywordRestart) {
+        if (body === keywordRestart && keywordRestart !== "") {
             await ticket.update({
                 isBot: true,
                 typebotSessionId: null
@@ -385,10 +670,10 @@ const typebotListener = async ({
 
             await ticket.reload();
 
-            await wbot.sendMessage(`${number}@c.us`, { text: typebotRestartMessage })
+            await wbot.sendMessage(`${number}@c.us`, { text: restartMessage })
 
         }
-        if (body === typebotKeywordFinish) {
+        if (closedWords.includes(body) ) {
             await UpdateTicketService({
                 ticketData: {
                     status: "closed",

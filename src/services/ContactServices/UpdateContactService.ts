@@ -13,7 +13,6 @@ interface ContactData {
   name?: string;
   active?: boolean;  
   extraInfo?: ExtraInfo[];
-  disableBot?: boolean
 }
 
 interface Request {
@@ -27,7 +26,7 @@ const UpdateContactService = async ({
   contactId,
   companyId
 }: Request): Promise<Contact> => {
-  const { email, name, number, extraInfo, active, disableBot } = contactData;
+  const { email, name, number, extraInfo, active } = contactData;
 
   const contact = await Contact.findOne({
     where: { id: contactId },
@@ -65,8 +64,7 @@ const UpdateContactService = async ({
     name,
     number,
     email,
-	active,
-  disableBot
+	active
   });
 
   await contact.reload({

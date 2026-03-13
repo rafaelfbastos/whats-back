@@ -29,11 +29,27 @@ export const ClosedAllOpenTickets = async (companyId: number): Promise<void> => 
         status: "closed",
         //  userId: ticket.userId || null,
         lastMessage: body,
-        unreadMessages: 0,
-        amountUseBotQueues: 0
+        useIntegration: false,
+        integrationId: null,
+        typebotStatus: false,
+        typebotSessionId: null
+
       });
 
-    } else {
+    } else if (currentStatus === 'typebot') {
+      await ticket.update({
+        status: "closed",
+        //  userId: ticket.userId || null,
+        lastMessage: body,
+        useIntegration: false,
+        integrationId: null,
+        typebotStatus: false,
+        typebotSessionId: null
+      });
+    }
+
+
+    else {
 
       await ticket.update({
         status: "closed",
@@ -47,7 +63,7 @@ export const ClosedAllOpenTickets = async (companyId: number): Promise<void> => 
   try {
 
     const { rows: tickets } = await Ticket.findAndCountAll({
-      where: { status: { [Op.in]: ["open"] }, companyId },
+      where: { status: { [Op.in]: ["open", "pending"] }, companyId },
       order: [["updatedAt", "DESC"]]
     });
 
@@ -101,14 +117,60 @@ export const ClosedAllOpenTickets = async (companyId: number): Promise<void> => 
               userId: ticket.userId,
             })
 
-            io.to("open").emit(`company-${companyId}-ticket`, {
-              action: "delete",
-              ticketId: showTicket.id
-            });
-
+            io.to(`${showTicket.id}`)
+              .to(`company-${companyId}-${showTicket.status}`)
+              .to(`company-${companyId}-notification`)
+              .to(`queue-${showTicket.queueId}-${showTicket.status}`)
+              .to(`queue-${showTicket.queueId}-notification`)
+              .emit(`company-${companyId}-ticket`, {
+                action: "delete",
+                ticketId: showTicket.id
+              });
           }
         }
+
+         const waitMensage = showTicket.lastMessage?.toLowerCase().includes("por favor, aguarde ⏳, você será atendido em breve 😊.");
+
+        if (showTicket.status === "pending" && showTicket.typebotStatus
+          && !waitMensage
+        ) {
+
+          const dataUltimaInteracaoChamado = new Date(showTicket.updatedAt)
+
+          if (dataUltimaInteracaoChamado < dataLimite && showTicket.fromMe) {
+
+            closeTicket(showTicket, 'typebot', bodyExpiresMessageInactive);
+
+            if (expiresInactiveMessage !== "" && expiresInactiveMessage !== undefined) {
+              const sentMessage = await SendWhatsAppMessage({ body: bodyExpiresMessageInactive, ticket: showTicket });
+
+              await verifyMessage(sentMessage, showTicket, showTicket.contact);
+            }
+
+            await ticketTraking.update({
+              finishedAt: moment().toDate(),
+              closedAt: moment().toDate(),
+              whatsappId: ticket.whatsappId,
+              userId: ticket.userId,
+            })
+
+            io.to(`${showTicket.id}`)
+              .to(`company-${companyId}-${showTicket.status}`)
+              .to(`company-${companyId}-notification`)
+              .to(`queue-${showTicket.queueId}-${showTicket.status}`)
+              .to(`queue-${showTicket.queueId}-notification`)
+              .emit(`company-${companyId}-ticket`, {
+                action: "delete",
+                ticketId: showTicket.id
+              });
+          }
+
+        }
       }
+
+
+
+
     });
 
   } catch (e: any) {

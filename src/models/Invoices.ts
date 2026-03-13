@@ -6,10 +6,11 @@ import {
   Model,
   PrimaryKey,
   AutoIncrement,
-  AllowNull,
-  HasMany,
-  Unique
+  ForeignKey,
+  BelongsTo,
+  DataType
 } from "sequelize-typescript";
+import Company from "./Company";
 
 @Table({ tableName: "Invoices" })
 class Invoices extends Model<Invoices> {
@@ -36,9 +37,27 @@ class Invoices extends Model<Invoices> {
   @Column
   dueDate: string;
 
+  @ForeignKey(() => Company)
   @Column
   companyId: number;
 
+  @BelongsTo(() => Company)
+  company: Company;
+
+  @Column
+  paymentMethod: string;
+
+  @Column
+  asaasPaymentId: string;
+
+  @Column
+  boletoUrl: string;
+
+  @Column
+  boletoBarcode: string;
+
+  @Column(DataType.TEXT)
+  pixQrCode: string;
 }
 
 export default Invoices;

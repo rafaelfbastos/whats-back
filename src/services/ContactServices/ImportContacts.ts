@@ -4,6 +4,7 @@ import { has } from "lodash";
 import Contact from "../../models/Contact";
 import CheckContactNumber from "../WbotServices/CheckNumber";
 import { logger } from "../../utils/logger";
+import getNumberFromJid from "../../utils/getNumberFromJid";
 
 export async function ImportContacts(
   companyId: number,
@@ -62,7 +63,7 @@ export async function ImportContacts(
     for (let newContact of contactList) {
       try {
         const response = await CheckContactNumber(newContact.number, companyId);
-        const number = response.jid.replace(/\D/g, "");
+        const number = getNumberFromJid(response.jid);
         newContact.number = number;
         await newContact.save();
       } catch (e) {

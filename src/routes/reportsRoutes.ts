@@ -1,21 +1,13 @@
-import express from 'express';
-import isAuth from '../middleware/isAuth';
+import express from "express";
+import isAuth from "../middleware/isAuth";
 
-import * as ReportsController from '../controllers/ReportsController';
+import * as ReportsController from "../controllers/ReportsController";
 
-const reportsRoutes = express.Router();
+const routes = express.Router();
 
-reportsRoutes.get(
-  '/reports/appointmentsAtendent',
-  isAuth,
-  ReportsController.appointmentsAtendent,
-);
+routes.get("/reports/appointmentsAtendent", isAuth, ReportsController.appointmentsAtendent);
+routes.get("/reports/rushHour", isAuth, ReportsController.rushHour);
+routes.get("/reports/departamentRatings", isAuth, ReportsController.departamentRatings);
+routes.get("/ticket/reports", isAuth, ReportsController.ticketReports);
 
-reportsRoutes.get('/reports/rushHour', isAuth, ReportsController.rushHour);
-reportsRoutes.get(
-  '/reports/departamentRatings',
-  isAuth,
-  ReportsController.departamentRatings,
-);
-
-export default reportsRoutes;
+export default routes;

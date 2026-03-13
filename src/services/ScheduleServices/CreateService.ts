@@ -2,6 +2,7 @@ import * as Yup from "yup";
 
 import AppError from "../../errors/AppError";
 import Schedule from "../../models/Schedule";
+import moment from "moment";
 
 interface Request {
   body: string;
@@ -29,10 +30,12 @@ const CreateService = async ({
     throw new AppError(err.message);
   }
 
+  const normalizedSendAt = moment(sendAt).toDate();
+
   const schedule = await Schedule.create(
     {
       body,
-      sendAt,
+      sendAt: normalizedSendAt,
       contactId,
       companyId,
       userId,

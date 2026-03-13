@@ -4,14 +4,13 @@ import AppError from "../errors/AppError";
 import formatBody from "../helpers/Mustache";
 import SetTicketMessagesAsRead from "../helpers/SetTicketMessagesAsRead";
 import { getIO } from "../libs/socket";
+import { removeWbot, waitForQrCode } from "../libs/wbot";
 import Ticket from "../models/Ticket";
 import Message from "../models/Message";
 import Queue from "../models/Queue";
 import User from "../models/User";
 import Whatsapp from "../models/Whatsapp";
-import { lookup } from 'mime-types';
 import { isNil } from "lodash";
-import QuickMessage from "../models/QuickMessage";
 import CreateOrUpdateContactService from "../services/ContactServices/CreateOrUpdateContactService";
 import SendWhatsAppReaction from "../services/WbotServices/SendWhatsAppReaction";
 import ListMessagesService from "../services/MessageServices/ListMessagesService";
@@ -23,11 +22,14 @@ import DeleteWhatsAppMessage from "../services/WbotServices/DeleteWhatsAppMessag
 import GetProfilePicUrl from "../services/WbotServices/GetProfilePicUrl";
 import ShowContactService from "../services/ContactServices/ShowContactService";
 import SendWhatsAppMedia from "../services/WbotServices/SendWhatsAppMedia";
-//import SendWhatsAppMediaInternal from "../services/WbotServices/SendWhatsAppMediaInternal";
 import path from "path";
 import SendWhatsAppMessage from "../services/WbotServices/SendWhatsAppMessage";
 import EditWhatsAppMessage from "../services/WbotServices/EditWhatsAppMessage";
 import ShowMessageService, { GetWhatsAppFromMessage } from "../services/MessageServices/ShowMessageService";
+import ShowWhatsAppByTokenService from "../services/WhatsappService/ShowWhatsAppByTokenService";
+import DeleteBaileysService from "../services/BaileysServices/DeleteBaileysService";
+import { StartWhatsAppSession } from "../services/WbotServices/StartWhatsAppSession";
+import getNumberFromJid from "../utils/getNumberFromJid";
 type IndexQuery = {
   pageNumber: string;
 };
@@ -134,7 +136,7 @@ export const send = async (req: Request, res: Response): Promise<Response> => {
     const companyId = whatsapp.companyId;
 
     const CheckValidNumber = await CheckContactNumber(numberToTest, companyId);
-    const number = CheckValidNumber.jid.replace(/\D/g, "");
+    const number = getNumberFromJid(CheckValidNumber.jid);
     const profilePicUrl = await GetProfilePicUrl(
       number,
       companyId
@@ -200,6 +202,97 @@ export const send = async (req: Request, res: Response): Promise<Response> => {
       throw new AppError(err.message);
     }
   }
+};
+
+export const reconnectAndGetQrCode = async (
+  req: Request,
+  res: Response
+): Promise<Response> => {
+  const whatsappFromContext = res.locals?.whatsapp as Whatsapp | undefined;
+
+  if (!whatsappFromContext) {
+    throw new AppError("Acesso não permitido", 401);
+  }
+
+  const whatsapp = await Whatsapp.findByPk(whatsappFromContext.id);
+
+  if (!whatsapp) {
+    throw new AppError("ERR_NO_WAPP_FOUND", 404);
+  }
+
+  if (whatsapp.status === "CONNECTED") {
+    return res.status(409).json({
+      message: "A conexão já está autenticada e não necessita de QR Code."
+    });
+  }
+
+  if (whatsapp.status === "qrcode" && whatsapp.qrcode) {
+    return res.status(200).json({ qrcode: whatsapp.qrcode });
+  }
+
+  await removeWbot(whatsapp.id);
+
+  await whatsapp.update({
+    session: "",
+    qrcode: "",
+    status: "PENDING",
+    retries: 0,
+    number: ""
+  });
+
+  await DeleteBaileysService(whatsapp.id);
+
+  let waitQrPromise: Promise<string>;
+
+  try {
+    waitQrPromise = waitForQrCode(whatsapp.id);
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError("Não foi possível aguardar a geração do QR Code.");
+  }
+
+  void StartWhatsAppSession(whatsapp, whatsapp.companyId);
+
+  try {
+    const qrCode = await waitQrPromise;
+
+    return res.status(200).json({ qrcode: qrCode });
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError("Não foi possível gerar o QR Code para esta conexão.");
+  }
+};
+
+export const status = async (req: Request, res: Response): Promise<Response> => {
+  const whatsappFromContext = res.locals?.whatsapp as Whatsapp | undefined;
+
+  let whatsapp = whatsappFromContext;
+
+  if (!whatsapp) {
+    const authorization = req.headers.authorization;
+
+    if (!authorization) {
+      throw new AppError("Acesso não permitido", 401);
+    }
+
+    const token = authorization.replace("Bearer ", "");
+    whatsapp = await ShowWhatsAppByTokenService(token);
+  }
+
+  return res.status(200).json({
+    id: whatsapp.id,
+    name: whatsapp.name,
+    status: whatsapp.status,
+    battery: whatsapp.battery,
+    plugged: whatsapp.plugged,
+    number: whatsapp.number
+  });
 };
 
 export const addReaction = async (req: Request, res: Response): Promise<Response> => {
@@ -334,7 +427,7 @@ export const forwardMessage = async (
 
     const publicFolder = path.join(__dirname, '..', '..', '..', 'backend', 'public');
 
-    const filePath = path.join(publicFolder, `company${createTicket.companyId}`, fileName)
+    const filePath = path.join(publicFolder, fileName);
 
     const mediaSrc = {
       fieldname: 'medias',

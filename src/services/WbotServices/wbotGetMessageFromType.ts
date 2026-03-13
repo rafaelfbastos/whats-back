@@ -1,4 +1,4 @@
-import { proto } from "@whiskeysockets/baileys";
+import type { proto } from "@whiskeysockets/baileys";
 
 // Função para extrair informações de mensagens de texto
 export const getTextMessage = (msg: proto.IWebMessageInfo) => {

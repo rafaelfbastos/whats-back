@@ -32,6 +32,7 @@ import ChatUser from "../models/ChatUser";
 import ChatMessage from "../models/ChatMessage";
 import Invoices from "../models/Invoices";
 import Subscriptions from "../models/Subscriptions";
+import BillingCustomer from "../models/BillingCustomer";
 import BaileysChats from "../models/BaileysChats";
 import Files from "../models/Files";
 import FilesOptions from "../models/FilesOptions";
@@ -78,6 +79,7 @@ const models = [
   ChatMessage,
   Invoices,
   Subscriptions,
+  BillingCustomer,
   BaileysChats,
   Files,
   FilesOptions,

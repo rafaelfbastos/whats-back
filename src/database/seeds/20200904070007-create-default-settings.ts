@@ -109,6 +109,13 @@ module.exports = {
                             createdAt: new Date(),
                             updatedAt: new Date()
                         },
+                        {
+                            key: "asaasWebhookToken",
+                            value: "",
+                            companyId: 1,
+                            createdAt: new Date(),
+                            updatedAt: new Date()
+                        },
 
                     ],
                     { transaction: t }

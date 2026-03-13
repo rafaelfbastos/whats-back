@@ -4,6 +4,7 @@ import { has } from "lodash";
 import ContactListItem from "../../models/ContactListItem";
 import CheckContactNumber from "../WbotServices/CheckNumber";
 import { logger } from "../../utils/logger";
+import getNumberFromJid from "../../utils/getNumberFromJid";
 // import CheckContactNumber from "../WbotServices/CheckNumber";
 
 export async function ImportContacts(
@@ -66,7 +67,7 @@ export async function ImportContacts(
       try {
         const response = await CheckContactNumber(newContact.number, companyId);
         newContact.isWhatsappValid = response.exists;
-        const number = response.jid.replace(/\D/g, "");
+        const number = getNumberFromJid(response.jid);
         newContact.number = number;
         await newContact.save();
       } catch (e) {

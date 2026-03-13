@@ -3,6 +3,7 @@ import * as Yup from "yup";
 import AppError from "../../errors/AppError";
 import Schedule from "../../models/Schedule";
 import ShowService from "./ShowService";
+import moment from "moment";
 
 interface ScheduleData {
   id?: number;
@@ -45,6 +46,8 @@ const UpdateUserService = async ({
     userId,
   } = scheduleData;
 
+  const normalizedSendAt = sendAt ? moment(sendAt).toDate() : undefined;
+
   try {
     await schema.validate({ body });
   } catch (err: any) {
@@ -53,7 +56,7 @@ const UpdateUserService = async ({
 
   await schedule.update({
     body,
-    sendAt,
+    sendAt: normalizedSendAt,
     sentAt,
     contactId,
     ticketId,

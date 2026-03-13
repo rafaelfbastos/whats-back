@@ -1,84 +1,108 @@
 import * as Sentry from "@sentry/node";
-import makeWASocket, {
+import type {
   WASocket,
   Browsers,
-  WAMessage,
   DisconnectReason,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-  makeInMemoryStore,
-  isJidBroadcast,
-  WAMessageKey,
-  jidNormalizedUser,
   CacheStore
 } from "@whiskeysockets/baileys";
 import { Op } from "sequelize";
 import { FindOptions } from "sequelize/types";
 import Whatsapp from "../models/Whatsapp";
 import { logger } from "../utils/logger";
-import MAIN_LOGGER from "@whiskeysockets/baileys/lib/Utils/logger";
 import authState from "../helpers/authState";
 import { Boom } from "@hapi/boom";
 import AppError from "../errors/AppError";
 import { getIO } from "./socket";
-import { Store } from "./store";
 import { StartWhatsAppSession } from "../services/WbotServices/StartWhatsAppSession";
 import DeleteBaileysService from "../services/BaileysServices/DeleteBaileysService";
 import NodeCache from 'node-cache';
 import Contact from "../models/Contact";
 import Ticket from "../models/Ticket";
-const loggerBaileys = MAIN_LOGGER.child({});
-loggerBaileys.level = "error";
-
-const msgRetryCounterCache = new NodeCache({
-  stdTTL: 600,
-  maxKeys: 1000,
-  checkperiod: 300,
-  useClones: false
-});
-
-const msgCache = new NodeCache({
-  stdTTL: 60,
-  maxKeys: 1000,
-  checkperiod: 300,
-  useClones: false
-});
+import { loadBaileys, loadBaileysLogger } from "./baileys";
+import getNumberFromJid from "../utils/getNumberFromJid";
+let cachedBaileys: Awaited<ReturnType<typeof loadBaileys>> | null = null;
+const getBaileys = async () => {
+  if (!cachedBaileys) cachedBaileys = await loadBaileys();
+  return cachedBaileys;
+};
 
 type Session = WASocket & {
   id?: number;
-  store?: Store;
 };
-
-export default function msg() {
-  return {
-    get: (key: WAMessageKey) => {
-      const { id } = key;
-      if (!id) return;
-      let data = msgCache.get(id);
-      if (data) {
-        try {
-          let msg = JSON.parse(data as string);
-          return msg?.message;
-        } catch (error) {
-          logger.error(error);
-        }
-      }
-    },
-    save: (msg: WAMessage) => {
-      const { id } = msg.key;
-      const msgtxt = JSON.stringify(msg);
-      try {
-        msgCache.set(id as string, msgtxt);
-      } catch (error) {
-        logger.error(error);
-      }
-    }
-  }
-}
 
 const sessions: Session[] = [];
 
 const retriesQrCodeMap = new Map<number, number>();
+
+type QrCodeWaiter = {
+  resolve: (qrCode: string) => void;
+  reject: (error: unknown) => void;
+  timeout: NodeJS.Timeout;
+};
+
+const qrCodeWaiters = new Map<number, QrCodeWaiter>();
+
+const resolveQrCodeWaiter = (whatsappId: number, qrCode: string): void => {
+  const waiter = qrCodeWaiters.get(whatsappId);
+
+  if (!waiter) return;
+
+  clearTimeout(waiter.timeout);
+  qrCodeWaiters.delete(whatsappId);
+  waiter.resolve(qrCode);
+};
+
+const rejectQrCodeWaiter = (whatsappId: number, error: Error | string): void => {
+  const waiter = qrCodeWaiters.get(whatsappId);
+
+  if (!waiter) return;
+
+  clearTimeout(waiter.timeout);
+  qrCodeWaiters.delete(whatsappId);
+  const formattedError =
+    typeof error === "string"
+      ? new AppError(error)
+      : error;
+  waiter.reject(formattedError);
+};
+
+export const waitForQrCode = (
+  whatsappId: number,
+  timeoutMs = 60000
+): Promise<string> => {
+  if (qrCodeWaiters.has(whatsappId)) {
+    throw new AppError(
+      "Já existe uma solicitação de QR Code em andamento para esta conexão.",
+      429
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      qrCodeWaiters.delete(whatsappId);
+      reject(
+        new AppError(
+          "Não foi possível gerar o QR Code dentro do tempo limite.",
+          504
+        )
+      );
+    }, timeoutMs);
+
+    qrCodeWaiters.set(whatsappId, {
+      resolve: (qrCode: string) => {
+        clearTimeout(timeout);
+        qrCodeWaiters.delete(whatsappId);
+        resolve(qrCode);
+      },
+      reject: (error: unknown) => {
+        clearTimeout(timeout);
+        qrCodeWaiters.delete(whatsappId);
+        reject(error);
+      },
+      timeout
+    });
+  });
+};
 
 export const getWbot = (whatsappId: number): Session => {
   const sessionIndex = sessions.findIndex(s => s.id === whatsappId);
@@ -135,12 +159,15 @@ export const restartWbot = async (
   }
 };
 
-export const msgDB = msg();
-
 export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
   return new Promise(async (resolve, reject) => {
     try {
       (async () => {
+        const baileys = await getBaileys();
+        const MAIN_LOGGER = await loadBaileysLogger();
+        const loggerBaileys = MAIN_LOGGER.child({});
+        loggerBaileys.level = "error";
+
         const io = getIO();
 
         const whatsappUpdate = await Whatsapp.findOne({
@@ -151,8 +178,9 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
 
         const { id, name, provider } = whatsappUpdate;
 
-        const { version, isLatest } = await fetchLatestBaileysVersion();
+        const { version, isLatest } = await baileys.fetchLatestBaileysVersion();
         const isLegacy = provider === "stable" ? true : false;
+        const DisconnectReason = baileys.DisconnectReason;
 
         logger.info(`using WA v${version.join(".")}, isLatest: ${isLatest}`);
         logger.info(`isLegacy: ${isLegacy}`);
@@ -160,34 +188,29 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
         let retriesQrCode = 0;
 
         let wsocket: Session = null;
-        const store = makeInMemoryStore({
-          logger: loggerBaileys
-        });
-
         const { state, saveState } = await authState(whatsapp);
 
-        //const msgRetryCounterCache = new NodeCache();
+        const msgRetryCounterCache = new NodeCache();
         const userDevicesCache: CacheStore = new NodeCache();
 
-        wsocket = makeWASocket({
+        wsocket = baileys.default({
           logger: loggerBaileys,
           printQRInTerminal: false,
+          browser: [
+            process.env.BROWSER_CLIENT || "Zappey",
+            process.env.BROWSER_NAME || "Chrome",
+            process.env.BROWSER_VERSION || "10.0"
+          ],
           auth: {
             creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, logger),
+            keys: baileys.makeCacheableSignalKeyStore(state.keys, logger),
           },
           version,
-		  browser: Browsers.appropriate("Desktop"),
-          defaultQueryTimeoutMs: undefined,
+          // defaultQueryTimeoutMs: 60000,
+          // retryRequestDelayMs: 250,
+          // keepAliveIntervalMs: 1000 * 60 * 10 * 3,
           msgRetryCounterCache,
-		  markOnlineOnConnect: false,
-		  connectTimeoutMs: 25_000,
-		  retryRequestDelayMs: 500,
-		  getMessage: msgDB.get,
-		  emitOwnEvents: true,
-          fireInitQueries: true,
-		  transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
-          shouldIgnoreJid: jid => isJidBroadcast(jid),
+          shouldIgnoreJid: jid => baileys.isJidBroadcast(jid),
         });
 
         // wsocket = makeWASocket({
@@ -236,7 +259,7 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
 
                 await DeleteBaileysService(whatsapp.id);
 
-                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
+                io.to(`company-${whatsapp.companyId}-mainchannel`).emit(`company-${whatsapp.companyId}-whatsappSession`, {
                   action: "update",
                   session: whatsapp
                 });
@@ -249,13 +272,18 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
                 await whatsapp.update({ status: "PENDING", session: "", number: "" });
                 await DeleteBaileysService(whatsapp.id);
 
-                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
+                io.to(`company-${whatsapp.companyId}-mainchannel`).emit(`company-${whatsapp.companyId}-whatsappSession`, {
                   action: "update",
                   session: whatsapp
                 });
                 removeWbot(id, false);
                 setTimeout(() => StartWhatsAppSession(whatsapp, whatsapp.companyId), 2000);
               }
+
+              rejectQrCodeWaiter(
+                id,
+                "A sessão do WhatsApp foi encerrada antes que o QR Code fosse gerado."
+              );
             }
 
             if (connection === "open") {
@@ -265,14 +293,14 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
                 retries: 0,
                 number:
                   wsocket.type === "md"
-                    ? jidNormalizedUser((wsocket as WASocket).user.id).split("@")[0]
+                    ? baileys.jidNormalizedUser((wsocket as WASocket).user.id).split("@")[0]
                     : "-"
               });
 
-                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
-                  action: "update",
-                  session: whatsapp
-                });
+              io.to(`company-${whatsapp.companyId}-mainchannel`).emit(`company-${whatsapp.companyId}-whatsappSession`, {
+                action: "update",
+                session: whatsapp
+              });
 
               const sessionIndex = sessions.findIndex(
                 s => s.id === whatsapp.id
@@ -283,6 +311,11 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
               }
 
               resolve(wsocket);
+
+              rejectQrCodeWaiter(
+                id,
+                "A sessão do WhatsApp foi autenticada antes de gerar um QR Code."
+              );
             }
 
             if (qr !== undefined) {
@@ -293,7 +326,7 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
                 });
                 await DeleteBaileysService(whatsapp.id);
 
-                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
+                io.to(`company-${whatsapp.companyId}-mainchannel`).emit("whatsappSession", {
                   action: "update",
                   session: whatsapp
                 });
@@ -301,6 +334,11 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
                 wsocket.ws.close();
                 wsocket = null;
                 retriesQrCodeMap.delete(id);
+
+                rejectQrCodeWaiter(
+                  id,
+                  "Quantidade máxima de tentativas de geração de QR Code excedida."
+                );
               } else {
                 logger.info(`Session QRCode Generate ${name}`);
                 retriesQrCodeMap.set(id, (retriesQrCode += 1));
@@ -320,10 +358,12 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
                   sessions.push(wsocket);
                 }
 
-                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
+                io.to(`company-${whatsapp.companyId}-mainchannel`).emit(`company-${whatsapp.companyId}-whatsappSession`, {
                   action: "update",
                   session: whatsapp
                 });
+
+                resolveQrCodeWaiter(id, qr);
               }
             }
           }
@@ -343,7 +383,7 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
               }
               const contact = await Contact.findOne({
                 where: {
-                  number: remoteJid.replace(/\D/g, ""),
+                  number: getNumberFromJid(remoteJid),
                   companyId: whatsapp.companyId
                 }
               });
@@ -383,7 +423,6 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
           }
         );
 
-        store.bind(wsocket.ev);
       })();
     } catch (error) {
       Sentry.captureException(error);

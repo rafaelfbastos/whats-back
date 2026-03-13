@@ -15,6 +15,7 @@ import ticketNoteRoutes from "./ticketNoteRoutes";
 import quickMessageRoutes from "./quickMessageRoutes";
 import helpRoutes from "./helpRoutes";
 import dashboardRoutes from "./dashboardRoutes";
+import reportsRoutes from "./reportsRoutes";
 import queueOptionRoutes from "./queueOptionRoutes";
 import scheduleRoutes from "./scheduleRoutes";
 import tagRoutes from "./tagRoutes";
@@ -32,8 +33,6 @@ import promptRoutes from "./promptRouter";
 import queueIntegrationRoutes from "./queueIntegrationRoutes";
 import forgotsRoutes from "./forgotPasswordRoutes";
 import versionRouter from "./versionRoutes";
-import reportsRoutes from './reportsRoutes';
-
 const routes = Router();
 
 routes.use(userRoutes);
@@ -52,6 +51,7 @@ routes.use(ticketNoteRoutes);
 routes.use(quickMessageRoutes);
 routes.use(helpRoutes);
 routes.use(dashboardRoutes);
+routes.use(reportsRoutes);
 routes.use(queueOptionRoutes);
 routes.use(scheduleRoutes);
 routes.use(tagRoutes);
@@ -68,7 +68,6 @@ routes.use(filesRoutes);
 routes.use(promptRoutes);
 routes.use(queueIntegrationRoutes);
 routes.use(forgotsRoutes);
-routes.use(reportsRoutes);
 routes.use(versionRouter);
 
 export default routes;

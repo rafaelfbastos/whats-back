@@ -3,7 +3,12 @@ import type {
   AuthenticationState,
   SignalDataTypeMap
 } from "@whiskeysockets/baileys";
-import { BufferJSON, initAuthCreds, proto } from "@whiskeysockets/baileys";
+import { loadBaileys } from "../libs/baileys";
+let cachedBaileys: Awaited<ReturnType<typeof loadBaileys>> | null = null;
+const getBaileys = async () => {
+  if (!cachedBaileys) cachedBaileys = await loadBaileys();
+  return cachedBaileys;
+};
 import Whatsapp from "../models/Whatsapp";
 
 const KEY_MAP: { [T in keyof SignalDataTypeMap]: string } = {
@@ -12,19 +17,23 @@ const KEY_MAP: { [T in keyof SignalDataTypeMap]: string } = {
   "sender-key": "senderKeys",
   "app-state-sync-key": "appStateSyncKeys",
   "app-state-sync-version": "appStateVersions",
-  "sender-key-memory": "senderKeyMemory"
+  "sender-key-memory": "senderKeyMemory",
+  "lid-mapping": "lids",
+  "device-list": "deviceList",
+  tctoken: "tctoken"
 };
 
 const authState = async (
   whatsapp: Whatsapp
 ): Promise<{ state: AuthenticationState; saveState: () => void }> => {
+  const baileys = await getBaileys();
   let creds: AuthenticationCreds;
   let keys: any = {};
 
   const saveState = async () => {
     try {
       await whatsapp.update({
-        session: JSON.stringify({ creds, keys }, BufferJSON.replacer, 0)
+        session: JSON.stringify({ creds, keys }, baileys.BufferJSON.replacer, 0)
       });
     } catch (error) {
       console.log(error);
@@ -34,11 +43,11 @@ const authState = async (
   // const getSessionDatabase = await whatsappById(whatsapp.id);
 
   if (whatsapp.session && whatsapp.session !== null) {
-    const result = JSON.parse(whatsapp.session, BufferJSON.reviver);
+    const result = JSON.parse(whatsapp.session, baileys.BufferJSON.reviver);
     creds = result.creds;
     keys = result.keys;
   } else {
-    creds = initAuthCreds();
+    creds = baileys.initAuthCreds();
     keys = {};
   }
 
@@ -52,7 +61,7 @@ const authState = async (
             let value = keys[key]?.[id];
             if (value) {
               if (type === "app-state-sync-key") {
-                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                value = baileys.proto.Message.AppStateSyncKeyData.fromObject(value);
               }
               dict[id] = value;
             }

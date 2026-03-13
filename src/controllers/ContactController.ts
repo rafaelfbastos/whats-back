@@ -20,6 +20,7 @@ import SimpleListService, {
 import ContactCustomField from "../models/ContactCustomField";
 import {head} from "lodash";
 import {ImportContacts} from "../services/ContactServices/ImportContacts";
+import getNumberFromJid from "../utils/getNumberFromJid";
 
 type IndexQuery = {
   searchParam: string;
@@ -91,7 +92,7 @@ export const store = async (req: Request, res: Response): Promise<Response> => {
 
   await CheckIsValidContact(newContact.number, companyId);
   const validNumber = await CheckContactNumber(newContact.number, companyId);
-  const number = validNumber.jid.replace(/\D/g, "");
+  const number = getNumberFromJid(validNumber.jid);
   newContact.number = number;
 
     // Check if the contact already exists
@@ -159,7 +160,7 @@ export const update = async (
 
   await CheckIsValidContact(contactData.number, companyId);
   const validNumber = await CheckContactNumber(contactData.number, companyId);
-  const number = validNumber.jid.replace(/\D/g, "");
+  const number = getNumberFromJid(validNumber.jid);
   contactData.number = number;
 
   const { contactId } = req.params;

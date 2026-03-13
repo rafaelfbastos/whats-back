@@ -60,14 +60,13 @@ const UpdateQueueIntegrationService = async ({
 
   const integration = await ShowIntegrationService(integrationId, companyId);
 
-  await integration.update({
+  const fieldsToUpdate = {
     type,
     name,
     projectName,
     jsonContent,
     language,
     urlN8N,
-    companyId,
     typebotExpires,
     typebotKeywordFinish,
     typebotSlug,
@@ -75,7 +74,19 @@ const UpdateQueueIntegrationService = async ({
     typebotDelayMessage,
     typebotKeywordRestart,
     typebotRestartMessage 
-  });
+  };
+
+  const sanitizedData = Object.entries(fieldsToUpdate).reduce(
+    (acc, [key, value]) => {
+      if (value !== undefined) {
+        acc[key] = value;
+      }
+      return acc;
+    },
+    {} as Record<string, unknown>
+  );
+
+  await integration.update(sanitizedData);
 
   return integration;
 };

@@ -6,12 +6,13 @@ import moment from "moment";
 import path from "path";
 import { Op, QueryTypes } from "sequelize";
 import sequelize from "./database";
+import AppError from "./errors/AppError";
 import GetDefaultWhatsApp from "./helpers/GetDefaultWhatsApp";
 import GetWhatsappWbot from "./helpers/GetWhatsappWbot";
 import formatBody from "./helpers/Mustache";
 import { MessageData, SendMessage } from "./helpers/SendMessage";
+import ValidateWhatsappSession from "./helpers/ValidateWhatsappSession";
 import { getIO } from "./libs/socket";
-import { getWbot } from "./libs/wbot";
 import Campaign from "./models/Campaign";
 import CampaignSetting from "./models/CampaignSetting";
 import CampaignShipping from "./models/CampaignShipping";
@@ -267,7 +268,7 @@ async function handleSendScheduledMessage(job) {
 
     let filePath = null;
     if (schedule.mediaPath) {
-      filePath = path.resolve("public", `company${schedule.companyId}`, schedule.mediaPath);
+      filePath = path.resolve("public", schedule.mediaPath);
     }
 
     await SendMessage(whatsapp, {
@@ -351,7 +352,7 @@ async function getCampaign(id) {
       {
         model: Whatsapp,
         as: "whatsapp",
-        attributes: ["id", "name"]
+        attributes: ["id", "name", "session"]
       },
       {
         model: CampaignShipping,
@@ -686,15 +687,24 @@ async function handleDispatchCampaign(job) {
     const { data } = job;
     const { campaignShippingId, campaignId }: DispatchCampaignData = data;
     const campaign = await getCampaign(campaignId);
+
+    if (!campaign?.whatsapp) {
+      logger.error(
+        `campaignQueue -> DispatchCampaign -> error: whatsapp not found`
+      );
+      return;
+    }
+
+    const isValidSession = ValidateWhatsappSession(campaign.whatsapp);
+
+    if (!isValidSession) {
+      throw new AppError("ERR_WAPP_SESSION_INVALID", 401);
+    }
+
     const wbot = await GetWhatsappWbot(campaign.whatsapp);
 
     if (!wbot) {
       logger.error(`campaignQueue -> DispatchCampaign -> error: wbot not found`);
-      return;
-    }
-
-    if (!campaign.whatsapp) {
-      logger.error(`campaignQueue -> DispatchCampaign -> error: whatsapp not found`);
       return;
     }
 
@@ -714,7 +724,30 @@ async function handleDispatchCampaign(job) {
       }
     );
 
+    if (!campaignShipping) {
+      logger.error(
+        `campaignQueue -> DispatchCampaign -> error: campaign shipping not found`
+      );
+      return;
+    }
+
     const chatId = `${campaignShipping.number}@s.whatsapp.net`;
+
+    const preparePresence = async (): Promise<void> => {
+      try {
+        await wbot.presenceSubscribe(chatId);
+        await wbot.sendPresenceUpdate("available", chatId);
+        await new Promise(resolve => setTimeout(resolve, 300));
+      } catch (error) {
+        logger.warn(
+          `campaignQueue -> DispatchCampaign -> presence handshake failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    };
+
+    await preparePresence();
 
     let body = campaignShipping.message;
 
@@ -737,8 +770,8 @@ async function handleDispatchCampaign(job) {
     }
 
     if (campaign.mediaPath) {
-            const publicFolder = path.resolve(__dirname, "..", "public");
-            const filePath = path.join(publicFolder, `company${campaign.companyId}`, campaign.mediaPath);
+      const publicFolder = path.resolve(__dirname, "..", "public");
+      const filePath = path.join(publicFolder, campaign.mediaPath);
 
       const options = await getMessageOptions(campaign.mediaName, filePath, body);
       if (Object.keys(options).length) {
@@ -796,112 +829,79 @@ async function handleLoginStatus(job) {
 
 
 async function handleInvoiceCreate() {
-  logger.info("GERENDO RECEITA...");
+  logger.info("Iniciando geração de boletos");
   const job = new CronJob('*/5 * * * * *', async () => {
+
+
     const companies = await Company.findAll();
     companies.map(async c => {
-    
-      const status = c.status;
-      const dueDate = c.dueDate; 
+      var dueDate = c.dueDate;
       const date = moment(dueDate).format();
       const timestamp = moment().format();
-      const hoje = moment().format("DD/MM/yyyy");
-      const vencimento = moment(dueDate).format("DD/MM/yyyy");
-      const diff = moment(vencimento, "DD/MM/yyyy").diff(moment(hoje, "DD/MM/yyyy"));
-      const dias = moment.duration(diff).asDays();
-    
-      if(status === true){
+      const hoje = moment(moment()).format("DD/MM/yyyy");
+      var vencimento = moment(dueDate).format("DD/MM/yyyy");
 
-      	//logger.info(`EMPRESA: ${c.id} está ATIVA com vencimento em: ${vencimento} | ${dias}`);
-      
-      	//Verifico se a empresa está a mais de 10 dias sem pagamento
-        
-        if(dias <= -3){
-       
-          logger.info(`EMPRESA: ${c.id} está VENCIDA A MAIS DE 3 DIAS... INATIVANDO... ${dias}`);
-          c.status = false;
-          await c.save(); // Save the updated company record
-          logger.info(`EMPRESA: ${c.id} foi INATIVADA.`);
-          logger.info(`EMPRESA: ${c.id} Desativando conexões com o WhatsApp...`);
-          
-          try {
-    		const whatsapps = await Whatsapp.findAll({
-      		where: {
-        		companyId: c.id,
-      		},
-      			attributes: ['id','status','session'],
-    		});
+      var diff = moment(vencimento, "DD/MM/yyyy").diff(moment(hoje, "DD/MM/yyyy"));
+      var dias = moment.duration(diff).asDays();
 
-    		for (const whatsapp of whatsapps) {
+      if (dias < 20) {
+        const plan = await Plan.findByPk(c.planId);
 
-            	if (whatsapp.session) {
-    				await whatsapp.update({ status: "DISCONNECTED", session: "" });
-    				const wbot = getWbot(whatsapp.id);
-    				await wbot.logout();
-                	logger.info(`EMPRESA: ${c.id} teve o WhatsApp ${whatsapp.id} desconectado...`);
-  				}
-    		}
-          
-  		  } catch (error) {
-    		// Lidar com erros, se houver
-    		console.error('Erro ao buscar os IDs de WhatsApp:', error);
-    		throw error;
-  		  }
+        const sql = `SELECT COUNT(*) mycount FROM "Invoices" WHERE "companyId" = ${c.id} AND "dueDate"::text LIKE '${moment(dueDate).format("yyyy-MM-DD")}%';`
+        const invoice = await sequelize.query(sql,
+          { type: QueryTypes.SELECT }
+        );
+        if (invoice[0]['mycount'] > 0) {
 
-        
-        }else{ // ELSE if(dias <= -3){
-        
-          const plan = await Plan.findByPk(c.planId);
-        
-          const sql = `SELECT * FROM "Invoices" WHERE "companyId" = ${c.id} AND "status" = 'open';`
-          const openInvoices = await sequelize.query(sql, { type: QueryTypes.SELECT }) as { id: number, dueDate: Date }[];
+        } else {
+          const sql = `INSERT INTO "Invoices" (detail, status, value, "updatedAt", "createdAt", "dueDate", "companyId")
+          VALUES ('${plan.name}', 'open', '${plan.value}', '${timestamp}', '${timestamp}', '${date}', ${c.id});`
 
-          const existingInvoice = openInvoices.find(invoice => moment(invoice.dueDate).format("DD/MM/yyyy") === vencimento);
-        
-          if (existingInvoice) {
-            // Due date already exists, no action needed
-            //logger.info(`Fatura Existente`);
-        
-          } else if (openInvoices.length > 0) {
-            const updateSql = `UPDATE "Invoices" SET "dueDate" = '${date}', "updatedAt" = '${timestamp}' WHERE "id" = ${openInvoices[0].id};`;
+          const invoiceInsert = await sequelize.query(sql,
+            { type: QueryTypes.INSERT }
+          );
 
-            await sequelize.query(updateSql, { type: QueryTypes.UPDATE });
-        
-            logger.info(`Fatura Atualizada ID: ${openInvoices[0].id}`);
-        
-          } else {
-          
-            const sql = `INSERT INTO "Invoices" (detail, status, value, "updatedAt", "createdAt", "dueDate", "companyId")
-            VALUES ('${plan.name}', 'open', '${plan.value}', '${timestamp}', '${timestamp}', '${date}', ${c.id});`
+          /*           let transporter = nodemailer.createTransport({
+                      service: 'gmail',
+                      auth: {
+                        user: 'email@gmail.com',
+                        pass: 'senha'
+                      }
+                    });
+ 
+                    const mailOptions = {
+                      from: 'heenriquega@gmail.com', // sender address
+                      to: `${c.email}`, // receiver (use array of string for a list)
+                      subject: 'Fatura gerada - Sistema', // Subject line
+                      html: `Olá ${c.name} esté é um email sobre sua fatura!<br>
+          <br>
+          Vencimento: ${vencimento}<br>
+          Valor: ${plan.value}<br>
+          Link: ${process.env.FRONTEND_URL}/financeiro<br>
+          <br>
+          Qualquer duvida estamos a disposição!
+                      `// plain text body
+                    };
+ 
+                    transporter.sendMail(mailOptions, (err, info) => {
+                      if (err)
+                        console.log(err)
+                      else
+                        console.log(info);
+                    }); */
 
-            const invoiceInsert = await sequelize.query(sql, { type: QueryTypes.INSERT });
-        
-            logger.info(`Fatura Gerada para o cliente: ${c.id}`);
+        }
 
-            // Rest of the code for sending email
-          }
-        
-          
-        
-        
-        } // if(dias <= -6){
-        
 
-      }else{ // ELSE if(status === true){
-      
-      	//logger.info(`EMPRESA: ${c.id} está INATIVA`);
-      
+
+
+
       }
-    
-    
 
     });
   });
-
-  job.start();
+  job.start()
 }
-
-
 
 handleCloseTicketsAutomatic()
 

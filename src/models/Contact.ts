@@ -67,10 +67,6 @@ class Contact extends Model<Contact> {
   @Column
   companyId: number;
 
-  @Default(false)
-  @Column
-  disableBot: boolean
-
   @BelongsTo(() => Company)
   company: Company;
 

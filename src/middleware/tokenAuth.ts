@@ -15,6 +15,7 @@ const tokenAuth = async (req: Request, res: Response, next: NextFunction): Promi
       req.params = {
         whatsappId: whatsapp.id.toString()
       }
+      res.locals.whatsapp = whatsapp;
     } else {
       throw new Error();
     }
