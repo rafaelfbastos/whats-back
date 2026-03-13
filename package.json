@@ -20,6 +20,7 @@
   "license": "MIT",
   "dependencies": {
     "@adiwajshing/keyed-db": "^0.2.4",
+    "axios": "^1.6.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@hapi/boom": "^9.1.4",
     "@sentry/node": "^6.18.1",
