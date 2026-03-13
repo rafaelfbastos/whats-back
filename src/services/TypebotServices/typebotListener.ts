@@ -284,7 +284,7 @@ const typebotListener = async ({
             });
 
             const config = {
-                method: 'post',
+                method: 'post' as const,
                 maxBodyLength: Infinity,
                 url: `${url}/api/v1/typebots/${typebotSlug}/startChat`,
                 headers: {
@@ -352,7 +352,7 @@ const typebotListener = async ({
                 });
 
                 let config = {
-                    method: 'post',
+                    method: 'post' as const,
                     maxBodyLength: Infinity,
                     url: `${url}/api/v1/sessions/${sessionId}/continueChat`,
                     headers: {
